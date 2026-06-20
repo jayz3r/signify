@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #15101f;
+  color: #f5f0ff;
+}
+
+::selection {
+  background-color: #ff3d7f;
+  color: #15101f;
+}
+
+/* Visible keyboard focus everywhere, in the accent rather than browser default blue */
+:focus-visible {
+  outline: 2px solid #29e7cd;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+/* subtle dot-grid backdrop used behind hero sections */
+.dot-grid {
+  background-image: radial-gradient(#382c52 1px, transparent 1px);
+  background-size: 22px 22px;
+}
