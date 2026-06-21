@@ -57,7 +57,7 @@ export const HANDSHAPES: Record<HandshapeId, Handshape> = {
   g: { id: "g", label: "G", gloss: "Index + thumb pointing sideways", cue: "Point index finger and thumb out sideways, parallel to each other, palm facing your body.", ...c(0), reliable: false },
   h: { id: "h", label: "H", gloss: "Index + middle pointing sideways", cue: "Index and middle finger out together pointing sideways, thumb tucked.", ...c(1), reliable: false },
   i: { id: "i", label: "I", gloss: "Pinky only, fist otherwise", cue: "Only your pinky is up, everything else curled into a fist.", ...c(2), reliable: true },
-  j: { id: "j", label: "J", gloss: "I-shape, traced like a J", cue: "Hold the I handshape (pinky up) and draw a small J in the air.", ...c(0), reliable: false, needsMotion: true },
+  j: { id: "j", label: "J", gloss: "I-shape, traced like a J", cue: "Hold the I handshape (pinky up) and draw a small J in the air.", ...c(0), reliable: true, needsMotion: true },
   k: { id: "k", label: "K", gloss: "Index + middle up, thumb between", cue: "Index and middle finger up in a V, thumb touches the middle finger's base.", ...c(1), reliable: true },
   l: { id: "l", label: "L", gloss: "Thumb + index forming an L", cue: "Index finger up, thumb out to the side — make an L shape.", ...c(2), reliable: true },
   m: { id: "m", label: "M", gloss: "Fist, thumb under three fingers", cue: "Curl index, middle, and ring over your tucked thumb.", ...c(0), reliable: false },
@@ -73,7 +73,7 @@ export const HANDSHAPES: Record<HandshapeId, Handshape> = {
   w: { id: "w", label: "W", gloss: "Index + middle + ring up", cue: "Index, middle, and ring finger up and spread, thumb and pinky tucked.", ...c(1), reliable: true },
   x: { id: "x", label: "X", gloss: "Index hooked like a hook", cue: "Curl your index finger into a hook, other fingers curled into a fist.", ...c(2), reliable: true },
   y: { id: "y", label: "Y", gloss: "Thumb + pinky out", cue: "Thumb and pinky stick out, the three middle fingers curl down.", ...c(0), reliable: true },
-  z: { id: "z", label: "Z", gloss: "Index traces a Z in the air", cue: "Point your index finger and draw a Z shape in the air.", ...c(1), reliable: false, needsMotion: true },
+  z: { id: "z", label: "Z", gloss: "Index traces a Z in the air", cue: "Point your index finger and draw a Z shape in the air.", ...c(1), reliable: true, needsMotion: true },
 };
 
 export const HANDSHAPE_LIST = Object.values(HANDSHAPES);
@@ -96,7 +96,10 @@ function fingerCurl(lm: Landmark[], tip: number, pip: number, mcp: number, wrist
   const tipD = dist(lm[tip], wrist);
   const pipD = dist(lm[pip], wrist);
   const mcpD = dist(lm[mcp], wrist);
-  if (tipD > pipD && tipD > mcpD * 1.15) return "extended";
+  // "extended" needs real separation from the pip distance, not just a hair
+  // more — a relaxed half-open hand was sneaking into "hook" instead of
+  // "extended", which then let it through C's allHook check below.
+  if (tipD > pipD * 1.05 && tipD > mcpD * 1.15) return "extended";
   if (tipD < pipD * 0.92) return "curled";
   return "hook"; // bent at one joint but tip hasn't folded past the pip — claw/hook shapes
 }
@@ -128,7 +131,11 @@ function getFeatures(lm: Landmark[]): HandFeatures {
   const thumbExtendedOut = dist(thumbTip, lm[5]) / palmWidth > 0.75 && dist(thumbTip, wrist) > dist(lm[2], wrist);
   const thumb: Curl | "tucked" = thumbExtendedOut ? "extended" : "tucked";
 
-  const touchThresh = palmWidth * 0.32;
+  // Generous touch threshold — real hands rarely get thumb and fingertip
+  // pixel-perfect together, especially for O, which is the whole point of
+  // this check. Too tight a threshold here was letting valid O poses fall
+  // through to "none" and get caught by the looser C check below instead.
+  const touchThresh = palmWidth * 0.48;
   let thumbTouches: HandFeatures["thumbTouches"] = "none";
   if (dist(thumbTip, lm[8]) < touchThresh) thumbTouches = "index";
   else if (dist(thumbTip, lm[12]) < touchThresh) thumbTouches = "middle";
@@ -178,11 +185,54 @@ export function classifyHandshape(lm: Landmark[]): HandshapeId | null {
   const f = getFeatures(lm);
   const ext = (x: Curl) => x === "extended";
   const curled = (x: Curl) => x === "curled";
+  const curledOrHook = (x: Curl) => x === "curled" || x === "hook";
 
   // --- thumb-touch letters (most specific, check first) ---
   if (f.thumbTouches === "index" && !ext(f.index) && ext(f.middle) && ext(f.ring) && ext(f.pinky)) return "f";
-  if (f.thumbTouches === "index" && curled(f.index) && curled(f.middle) && curled(f.ring) && curled(f.pinky)) return "o";
+
+  // O: thumb tip touches index fingertip and all four fingers are rounded
+  // (curled OR hook is fine — real hands rarely curl O all the way past the
+  // strict "curled" threshold, so requiring full curl here was misreading a
+  // good O as a hooked C). The thumb-touch is what actually distinguishes O
+  // from C — C leaves a visible gap between thumb and fingers.
+  if (
+    f.thumbTouches === "index" &&
+    curledOrHook(f.index) &&
+    curledOrHook(f.middle) &&
+    curledOrHook(f.ring) &&
+    curledOrHook(f.pinky)
+  ) {
+    return "o";
+  }
+
   if (f.thumbTouches === "middle" && ext(f.index) && !ext(f.middle) && curled(f.ring) && curled(f.pinky)) return "d";
+
+  // C: all four fingers rounded (curled OR hook — a real C often curls
+  // tighter than the old "hook"-only check expected, which made the
+  // classifier miss it entirely once finger-curl detection got stricter).
+  // Distinguish from the A/S/T fist shapes by thumb position: in C the
+  // thumb curves out to the side. It must not be touching a fingertip
+  // (that's O's job) and not doing S's "across palm" or T's "between
+  // index/middle" things. We DON'T exclude "thumbBesideHand" here anymore —
+  // a real C's thumb often still falls within that distance threshold from
+  // the index MCP, so excluding it was sending real C poses straight past
+  // this check and into the A fist-shape branch instead.
+  // To keep this from also swallowing A (a tight closed fist), require at
+  // least one finger to be "hook" rather than fully "curled" — A's fingers
+  // are all the way curled into the palm, C's are looser.
+  const fingersRoundedForC =
+    curledOrHook(f.index) && curledOrHook(f.middle) && curledOrHook(f.ring) && curledOrHook(f.pinky);
+  const atLeastOneHookForC =
+    f.index === "hook" || f.middle === "hook" || f.ring === "hook" || f.pinky === "hook";
+  if (
+    fingersRoundedForC &&
+    atLeastOneHookForC &&
+    f.thumbTouches === "none" &&
+    !f.thumbAcrossPalm &&
+    !f.thumbBetweenIndexMiddle
+  ) {
+    return "c";
+  }
 
   // --- crossed / hooked fingers ---
   if (f.indexMiddleCrossed && !ext(f.ring) && !ext(f.pinky)) return "r";
@@ -207,10 +257,6 @@ export function classifyHandshape(lm: Landmark[]): HandshapeId | null {
   if (ext(f.index) && !ext(f.middle) && !ext(f.ring) && !ext(f.pinky)) {
     return f.thumb === "extended" ? "l" : "g"; // plain point with thumb tucked ~ G/Q (orientation-ambiguous)
   }
-
-  // --- "curved, not fully open or closed" hand (C) ---
-  const allHook = f.index === "hook" && f.middle === "hook" && f.ring === "hook" && f.pinky === "hook";
-  if (allHook) return "c";
 
   // --- fully curled fist variants: A / S / E / M / N / T ---
   const fistClosed = curled(f.index) && curled(f.middle) && curled(f.ring) && curled(f.pinky);
@@ -241,29 +287,63 @@ export function classifyHandshapeWithMotion(
   trail: TrailPoint[] | undefined
 ): HandshapeId | null {
   const staticShape = classifyHandshape(lm);
-  if (!trail || trail.length < 6) return staticShape;
+  if (!trail || trail.length < 5) return staticShape;
 
-  const xs = trail.map((p) => p.x);
-  const ys = trail.map((p) => p.y);
+  // Only look at a recent, reasonably-spaced window so a long stale trail
+  // (e.g. left over from holding still) doesn't drown out the actual motion.
+  const now = trail[trail.length - 1].t;
+  const recent = trail.filter((p) => now - p.t < 700);
+  if (recent.length < 5) return staticShape;
+
+  const xs = recent.map((p) => p.x);
+  const ys = recent.map((p) => p.y);
   const xRange = Math.max(...xs) - Math.min(...xs);
   const yRange = Math.max(...ys) - Math.min(...ys);
+  const totalRange = Math.max(xRange, yRange);
 
-  let reversals = 0;
-  for (let i = 2; i < xs.length; i++) {
-    const prevDelta = xs[i - 1] - xs[i - 2];
-    const delta = xs[i] - xs[i - 1];
-    if (prevDelta !== 0 && delta !== 0 && Math.sign(prevDelta) !== Math.sign(delta)) reversals++;
+  // Need at least a small amount of real movement — otherwise a twitchy
+  // static hold could get misread as a trace.
+  if (totalRange < 0.03) return staticShape;
+
+  // Smooth out single-frame jitter before measuring direction reversals:
+  // average each point with its neighbor so tiny tracking noise doesn't
+  // register as a fake direction change.
+  const smoothX: number[] = xs.map((x, i) => {
+    const prev = xs[Math.max(0, i - 1)];
+    const next = xs[Math.min(xs.length - 1, i + 1)];
+    return (prev + x + next) / 3;
+  });
+
+  let xReversals = 0;
+  for (let i = 2; i < smoothX.length; i++) {
+    const prevDelta = smoothX[i - 1] - smoothX[i - 2];
+    const delta = smoothX[i] - smoothX[i - 1];
+    if (Math.abs(prevDelta) > 0.004 && Math.abs(delta) > 0.004 && Math.sign(prevDelta) !== Math.sign(delta)) {
+      xReversals++;
+    }
   }
 
-  // Z: index point, mostly horizontal path, with at least one back-and-forth
-  if (staticShape === "g" && xRange > yRange * 1.3 && reversals >= 1) return "z";
+  // Z: held as a "g"-like point (index out, thumb tucked), traced mostly
+  // sideways with at least one back-and-forth in x. Loosened from requiring
+  // a strict horizontal-dominant ratio — diagonal strokes of a real Z still
+  // count, as long as there's clearly more horizontal travel than a static
+  // hold and at least one reversal.
+  if (staticShape === "g" && xRange > 0.04 && xRange >= yRange * 0.7 && xReversals >= 1) {
+    return "z";
+  }
 
-  // J: pinky-up (I), path curves down then across — check first/second half
+  // J: held as an I (pinky up), path dips down then hooks sideways. Loosened
+  // to just check there's a clear vertical component followed by a
+  // horizontal component, rather than requiring a strict first-half/second-
+  // half split which was easy to miss with uneven sampling.
   if (staticShape === "i") {
-    const mid = Math.floor(trail.length / 2);
-    const firstHalfDy = trail[mid].y - trail[0].y;
-    const secondHalfDx = trail[trail.length - 1].x - trail[mid].x;
-    if (firstHalfDy > 0 && Math.abs(secondHalfDx) > yRange * 0.5) return "j";
+    const firstThird = recent[Math.floor(recent.length / 3)];
+    const lastPoint = recent[recent.length - 1];
+    const dy = lastPoint.y - recent[0].y;
+    const dxAfterDip = lastPoint.x - firstThird.x;
+    if (dy > 0.025 && Math.abs(dxAfterDip) > 0.02) {
+      return "j";
+    }
   }
 
   return staticShape;

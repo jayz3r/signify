@@ -43,6 +43,12 @@ const BACKGROUNDS: Record<string, string> = {
   forest: "bg-gradient-to-br from-[#10241d] via-[#1a2418] to-[#15101F]",
 };
 
+// Motion letters (J, Z) physically take longer to perform than holding a
+// static pose — the player has to trace a shape in the air, not just form
+// a handshape. Give them extra travel time so the note doesn't time out
+// before the trace can even complete.
+const MOTION_TIME_BONUS_SEC = 1.4;
+
 function loadScriptOnce(src: string) {
   return new Promise<void>((resolve, reject) => {
     const existing = document.querySelector(
@@ -264,7 +270,7 @@ export default function PlayClient({
   );
 
   // Advances progress every frame off the independent note clock, so the
-  // lane keeps moving even if the <audio> element never actually plays.
+  // timer keeps moving even if the <audio> element never actually plays.
   useEffect(() => {
     if (phase !== "playing") return;
     let raf: number;
@@ -274,18 +280,28 @@ export default function PlayClient({
         raf = requestAnimationFrame(tick);
         return;
       }
+      // Motion letters (J, Z) need real time in the air to trace their
+      // shape, on top of however long the static-pose travel time is. Without
+      // this, the note could time out as a miss before the player even
+      // finishes drawing the J or Z, since tracing takes noticeably longer
+      // than just holding a pose.
+      const needsMotion = HANDSHAPES[current.shape]?.needsMotion;
+      const effectiveTravelTime = needsMotion
+        ? config.travelTime + MOTION_TIME_BONUS_SEC
+        : config.travelTime;
+
       const { start, pausedMs, pauseBeganAt } = noteClockRef.current;
       const livePause =
         pauseBeganAt != null ? performance.now() - pauseBeganAt : 0;
       const elapsed = (performance.now() - start - pausedMs - livePause) / 1000;
-      const p = Math.min(1, elapsed / config.travelTime);
+      const p = Math.min(1, elapsed / effectiveTravelTime);
       setProgress(p);
 
       if (detectedRef.current === current.shape) {
         advanceNote("hit");
         return;
       }
-      if (!config.forgiving && elapsed >= config.travelTime) {
+      if (!config.forgiving && elapsed >= effectiveTravelTime) {
         advanceNote("miss");
         return;
       }
@@ -346,6 +362,7 @@ export default function PlayClient({
   const currentNote = chart.current[noteIndex];
   const accuracy =
     hits + misses > 0 ? Math.round((hits / (hits + misses)) * 100) : 0;
+  const cameraIsFloating = phase === "playing" || phase === "paused";
 
   return (
     <div
@@ -354,7 +371,7 @@ export default function PlayClient({
         BACKGROUNDS[bg] ?? BACKGROUNDS.void,
       )}
     >
-      <div className="mx-auto max-w-4xl px-6 py-8">
+      <div className="relative mx-auto max-w-4xl px-6 py-8">
         <div className="flex items-center justify-between">
           <Link
             href={`/choose-music/${song.id}/mode`}
@@ -378,24 +395,43 @@ export default function PlayClient({
           onError={(e) => console.log("audio error", e)}
         />
 
-        {/* Camera + hands status, always mounted so getUserMedia keeps a stable ref */}
-        <div className="relative mt-6 overflow-hidden rounded-2xl border border-line bg-panel">
+        {/* Camera + hands status, always mounted (same DOM node) so getUserMedia
+            keeps a stable ref. During gameplay it shrinks and floats over the
+            top-left corner of the game stage instead of taking a full block. */}
+        <div
+          className={clsx(
+            "overflow-hidden rounded-2xl border bg-panel/95 backdrop-blur-sm transition-all duration-300",
+            cameraIsFloating
+              ? "absolute left-6 top-[104px] z-30 w-36 border-[#3c2c78]/70 shadow-[0_0_30px_-6px_rgba(125,92,255,0.55)] sm:w-44"
+              : "relative mt-6 border-line",
+          )}
+        >
           <video
             ref={videoRef}
-            className="h-56 w-full -scale-x-100 object-cover opacity-90 sm:h-72"
+            className={clsx(
+              "w-full -scale-x-100 object-cover opacity-90",
+              cameraIsFloating ? "h-24 sm:h-28" : "h-56 sm:h-72",
+            )}
             muted
             playsInline
           />
-          <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-void/80 px-3 py-1.5 text-xs font-mono text-mute">
-            <Camera className="h-3.5 w-3.5" />
-            {detected ? (
-              <span className="text-shape">
-                Detected: {HANDSHAPES[detected].label}
-              </span>
-            ) : (
-              <span>No handshape detected</span>
-            )}
-          </div>
+          {cameraIsFloating ? (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide text-[#a3e635]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#a3e635]" style={{ boxShadow: "0 0 6px 2px rgba(163,230,53,0.7)" }} />
+              Connected
+            </div>
+          ) : (
+            <div className="absolute left-3 top-3 flex items-center gap-2 rounded-full bg-void/80 px-3 py-1.5 text-xs font-mono text-mute">
+              <Camera className="h-3.5 w-3.5" />
+              {detected ? (
+                <span className="text-shape">
+                  Detected: {HANDSHAPES[detected].label}
+                </span>
+              ) : (
+                <span>No handshape detected</span>
+              )}
+            </div>
+          )}
         </div>
 
         {(phase === "loading-model" || phase === "camera-request") && (
@@ -502,14 +538,14 @@ export default function PlayClient({
   );
 }
 
-// Deterministic pseudo-random sparkle field (no Math.random — keeps SSR and
+// Deterministic pseudo-random star field (no Math.random — keeps SSR and
 // client markup identical so hydration doesn't complain).
-const SPARKLES = Array.from({ length: 26 }).map((_, i) => {
+const SPARKLES = Array.from({ length: 30 }).map((_, i) => {
   const seed = i * 9301 + 49297;
   const rnd = (n: number) => ((seed * (n * 7919 + 1)) % 233280) / 233280;
   return {
     x: rnd(1) * 100,
-    y: rnd(2) * 58,
+    y: rnd(2) * 56,
     size: 1 + rnd(3) * 2,
     o: 0.2 + rnd(4) * 0.55,
     dur: 1.8 + rnd(5) * 2.4,
@@ -541,13 +577,19 @@ function GameStage({
   onPauseToggle: () => void;
 }) {
   const shape = HANDSHAPES[note.shape];
+  const [clueImgFailed, setClueImgFailed] = useState(false);
 
-  // Perspective interpolation: the note starts tiny near the vanishing
-  // point at the top of the corridor and grows as it nears the hit line.
+  // Reset the fallback flag whenever the sign changes, so a missing image
+  // for one letter doesn't permanently suppress the watermark for letters
+  // that do have one.
+  useEffect(() => {
+    setClueImgFailed(false);
+  }, [note.shape]);
+
+  // The card itself stays put — only the vertical timer strip drains as
+  // time runs out on the current note.
   const t = Math.min(progress, 1);
-  const topPct = 8 + t * 76;
-  const scale = 0.3 + t * 1.0;
-  const opacity = 0.55 + t * 0.45;
+  const timeLeftPct = Math.max(0, (1 - t) * 100);
   const tierFill = ((combo % 5) / 5) * 100;
 
   return (
@@ -556,11 +598,10 @@ function GameStage({
         className="relative h-[26rem] overflow-hidden rounded-[28px] border border-[#3c2c78]/70"
         style={{
           background:
-            "radial-gradient(ellipse 120% 70% at 50% 0%, #2a1c63 0%, #170f3c 45%, #0a0620 100%)",
-          boxShadow: "0 0 60px -10px rgba(120,60,255,0.45)",
+            "linear-gradient(180deg, #07051a 0%, #1b1042 36%, #3c1a58 64%, #170a30 100%)",
         }}
       >
-        {/* ambient sparkle field */}
+        {/* stars */}
         <div className="pointer-events-none absolute inset-0">
           {SPARKLES.map((s, i) => (
             <span
@@ -578,114 +619,111 @@ function GameStage({
           ))}
         </div>
 
-        {/* corridor: rails converging on a vanishing point, plus depth rungs */}
+        {/* drifting aurora bands */}
         <svg
           viewBox="0 0 700 420"
-          className="absolute inset-0 h-full w-full"
+          className="pointer-events-none absolute inset-0 h-full w-full"
           preserveAspectRatio="none"
         >
           <defs>
-            <filter
-              id="signify-glow"
-              x="-50%"
-              y="-50%"
-              width="200%"
-              height="200%"
-            >
-              <feGaussianBlur stdDeviation="4" result="blur" />
+            <filter id="signify-aurora-blur" x="-30%" y="-30%" width="160%" height="160%">
+              <feGaussianBlur stdDeviation="7" />
+            </filter>
+            <linearGradient id="signify-aurora-1" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stopColor="#ff4fd8" stopOpacity="0.6" />
+              <stop offset="50%" stopColor="#9d6bff" stopOpacity="0.55" />
+              <stop offset="100%" stopColor="#27e0ff" stopOpacity="0.6" />
+            </linearGradient>
+          </defs>
+          <g filter="url(#signify-aurora-blur)" style={{ animation: "signify-drift 10s ease-in-out infinite" }}>
+            <path d="M -60 95 Q 90 45 240 100 T 540 90 T 840 105" stroke="url(#signify-aurora-1)" strokeWidth="24" fill="none" opacity="0.55" />
+            <path d="M -60 135 Q 110 178 290 135 T 590 150 T 890 128" stroke="url(#signify-aurora-1)" strokeWidth="16" fill="none" opacity="0.4" />
+          </g>
+        </svg>
+
+        {/* giant hand watermark — uses your real clue silhouette for this
+            letter when it exists, falling back to a generic outline if not */}
+        {!clueImgFailed ? (
+          <img
+            key={shape.label}
+            src={`/clues/${shape.label}.png`}
+            alt=""
+            aria-hidden="true"
+            className="pointer-events-none absolute left-1/2 top-[16%] h-[80%] -translate-x-1/2 object-contain opacity-[0.12]"
+            onError={() => setClueImgFailed(true)}
+          />
+        ) : (
+          <svg
+            viewBox="0 0 400 420"
+            className="pointer-events-none absolute left-1/2 top-[16%] h-[80%] -translate-x-1/2 opacity-[0.07]"
+          >
+            <g fill="none" stroke="#ffffff" strokeWidth="6" strokeLinejoin="round" strokeLinecap="round">
+              <rect x="118" y="195" width="164" height="195" rx="52" />
+              <rect x="92" y="85" width="40" height="155" rx="19" />
+              <rect x="150" y="42" width="40" height="195" rx="19" />
+              <rect x="208" y="42" width="40" height="195" rx="19" />
+              <rect x="264" y="72" width="40" height="165" rx="19" />
+            </g>
+          </svg>
+        )}
+
+        {/* skyline: mountains + a palm silhouette */}
+        <svg
+          viewBox="0 0 700 420"
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          preserveAspectRatio="none"
+        >
+          <polygon points="0,330 90,250 160,310 230,228 320,330" fill="#190f30" opacity="0.9" />
+          <polygon points="430,330 500,242 560,302 615,255 700,330" fill="#140926" opacity="0.95" />
+          <g stroke="#0a0520" strokeWidth="6" fill="none" strokeLinecap="round">
+            <path d="M64 330 C 62 292 70 262 76 236" />
+            <path d="M76 236 C 46 226 26 236 12 251" />
+            <path d="M76 236 C 56 211 41 200 26 195" />
+            <path d="M76 236 C 92 206 108 196 124 196" />
+            <path d="M76 236 C 96 221 117 223 137 233" />
+          </g>
+        </svg>
+
+        {/* perspective grid floor */}
+        <svg
+          viewBox="0 0 700 420"
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          preserveAspectRatio="none"
+        >
+          <defs>
+            <filter id="signify-grid-glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="2.2" result="b" />
               <feMerge>
-                <feMergeNode in="blur" />
+                <feMergeNode in="b" />
                 <feMergeNode in="SourceGraphic" />
               </feMerge>
             </filter>
-            <linearGradient id="signify-rail" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#ff4fd8" stopOpacity="0.12" />
-              <stop offset="100%" stopColor="#ff4fd8" stopOpacity="0.9" />
-            </linearGradient>
           </defs>
-
-          {[0.18, 0.36, 0.56, 0.78].map((f, i) => {
-            const halfTop = 18;
-            const halfBottom = 330;
-            const half = halfTop + (halfBottom - halfTop) * f;
-            const y = 46 + f * 290;
+          <line x1="0" y1="330" x2="700" y2="330" stroke="#ff4fd8" strokeWidth="2" opacity="0.85" filter="url(#signify-grid-glow)" />
+          {Array.from({ length: 9 }).map((_, i) => {
+            const f = i / 8 - 0.5;
+            const x = 350 + f * 900;
             return (
-              <line
-                key={i}
-                x1={350 - half}
-                y1={y}
-                x2={350 + half}
-                y2={y}
-                stroke="#7d5cff"
-                strokeOpacity={0.18 + f * 0.12}
-                strokeWidth="1.5"
-              />
+              <line key={i} x1={350} y1={330} x2={x} y2={420} stroke="#7d5cff" strokeOpacity="0.4" strokeWidth="1.4" />
             );
           })}
-
-          <line
-            x1="350"
-            y1="40"
-            x2="32"
-            y2="368"
-            stroke="url(#signify-rail)"
-            strokeWidth="2.5"
-            filter="url(#signify-glow)"
-          />
-          <line
-            x1="350"
-            y1="40"
-            x2="668"
-            y2="368"
-            stroke="url(#signify-rail)"
-            strokeWidth="2.5"
-            filter="url(#signify-glow)"
-          />
-          <line
-            x1="20"
-            y1="368"
-            x2="680"
-            y2="368"
-            stroke="#ffe66d"
-            strokeWidth="3"
-            filter="url(#signify-glow)"
-          />
+          {[0.16, 0.36, 0.62, 1].map((f, i) => (
+            <line
+              key={i}
+              x1={350 - f * 350}
+              y1={330 + f * 90}
+              x2={350 + f * 350}
+              y2={330 + f * 90}
+              stroke="#ff4fd8"
+              strokeOpacity={0.5 - f * 0.3}
+              strokeWidth="1.4"
+            />
+          ))}
         </svg>
-
-        <div className="absolute left-1/2 top-[87.6%] -translate-x-1/2 -translate-y-1/2">
-          <span className="rounded-full bg-[#0a0620]/80 px-3 py-1 text-[11px] font-mono tracking-[0.2em] text-[#ffe66d]">
-            HIT ZONE
-          </span>
-        </div>
-
-        {/* falling note, scaling up as it approaches */}
-        <div
-          className="absolute left-1/2"
-          style={{
-            top: `${topPct}%`,
-            transform: `translate(-50%, -50%) scale(${scale})`,
-            opacity,
-          }}
-        >
-          <div
-            className={clsx(
-              "flex h-20 w-20 items-center justify-center rounded-2xl font-display text-2xl font-bold text-void ring-4 transition-transform duration-100",
-              shape.color,
-              shape.ring,
-              lastResult === "hit" && "scale-110",
-            )}
-            style={{
-              boxShadow:
-                "0 0 24px 4px rgba(255,79,216,0.55), 0 0 48px 12px rgba(125,92,255,0.35)",
-            }}
-          >
-            {shape.label}
-          </div>
-        </div>
 
         {/* judgment popup */}
         {lastResult && (
-          <div className="pointer-events-none absolute left-1/2 top-[58%] -translate-x-1/2 -translate-y-1/2">
+          <div className="pointer-events-none absolute left-1/2 top-[20%] -translate-x-1/2 -translate-y-1/2">
             <span
               key={`${lastResult}-${noteIndex}`}
               className={clsx(
@@ -706,10 +744,10 @@ function GameStage({
         )}
 
         {/* HUD: score, top-left */}
-        <div className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-[#0a0620]/75 px-3 py-1.5">
+        <div className="absolute right-4 top-4 z-10 flex items-center gap-2 rounded-full bg-[#0a0620]/75 px-3 py-1.5">
           <span
             className="h-2.5 w-2.5 rotate-45 rounded-[3px]"
-            style={{ background: "linear-gradient(135deg, #7d5cff, #ff4fd8)" }}
+            style={{ background: "linear-gradient(135deg, #27e0ff, #ff4fd8)" }}
           />
           <span className="font-mono text-sm font-semibold tracking-wide text-white">
             {score.toLocaleString()}
@@ -719,8 +757,8 @@ function GameStage({
           </span>
         </div>
 
-        {/* HUD: combo + tier bar + pause, top-right */}
-        <div className="absolute right-4 top-4 flex flex-col items-end gap-1">
+        {/* HUD: combo + tier bar + pause, below score */}
+        <div className="absolute right-4 top-14 z-10 flex flex-col items-end gap-1">
           <div className="flex items-baseline gap-1.5 rounded-full bg-[#0a0620]/75 px-3 py-1.5">
             <span
               className={clsx(
@@ -756,8 +794,46 @@ function GameStage({
           </div>
         </div>
 
+        {/* SIGN THIS card */}
+        <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-[46%] text-center">
+          <p
+            className="font-mono text-xs font-bold tracking-[0.35em] text-[#27e0ff]"
+            style={{ textShadow: "0 0 10px rgba(39,224,255,0.8)" }}
+          >
+            SIGN THIS:
+          </p>
+          <div
+            className={clsx(
+              "relative mt-3 flex h-28 w-28 items-center justify-center overflow-hidden rounded-2xl border-2 transition-transform duration-100",
+              lastResult === "hit" && "scale-110",
+            )}
+            style={{
+              borderColor: "#ff4fd8",
+              background: "rgba(10,6,32,0.55)",
+              boxShadow:
+                "0 0 22px 2px rgba(255,79,216,0.55), inset 0 0 22px rgba(255,79,216,0.15)",
+            }}
+          >
+            <div
+              className="absolute bottom-0 left-0 w-1.5"
+              style={{
+                height: `${timeLeftPct}%`,
+                background: "#27e0ff",
+                boxShadow: "0 0 10px 2px rgba(39,224,255,0.8)",
+                transition: "height 80ms linear",
+              }}
+            />
+            <span className="font-display text-4xl font-extrabold text-white">{shape.label}</span>
+          </div>
+          {shape.needsMotion && (
+            <p className="mt-2 text-[10px] font-mono uppercase tracking-[0.2em] text-[#27e0ff]/80">
+              Trace it in the air
+            </p>
+          )}
+        </div>
+
         {paused && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#0a0620]/85">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0a0620]/85">
             <button
               onClick={onPauseToggle}
               className="flex items-center gap-2 rounded-full bg-beat px-6 py-3 font-semibold text-void"
@@ -779,7 +855,7 @@ function GameStage({
             )}
             onError={(e) => {
               console.warn(
-                `No handshape reference image found at /audio/handsigns/${shape.label}.png`,
+                `No handshape reference image found at /handsigns/${shape.label}.png`,
               );
               (e.currentTarget as HTMLImageElement).style.display = "none";
             }}
@@ -805,6 +881,10 @@ function GameStage({
           25% { opacity: 1; transform: scale(1.15); }
           70% { opacity: 1; transform: scale(1); }
           100% { opacity: 0; transform: scale(1.05); }
+        }
+        @keyframes signify-drift {
+          0%, 100% { transform: translateX(0); }
+          50% { transform: translateX(18px); }
         }
       `}</style>
     </div>
